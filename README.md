@@ -24,6 +24,7 @@ game client attached.
 | `bot.go` | `Config` + validation, `Session`, `RunResult`, `PlanDay` — the core planning math (session lengths → action estimates under the 85% efficiency rule, with an optional daily action budget). |
 | `planner.go` | `SessionPlanner` — draws session durations from the configured range, never repeating the previous one (the "never identical twice" rule). RNG is injectable for tests. |
 | `ledger.go` | `Ledger` / `Entry` / `Summarize` — append-only event log with strictly-increasing-tick enforcement and a kind-based summary (clicks, keypresses, banks, chats, session count, time span). |
+| `reflex.go` | `Reflex` — the fast rule-based layer under the planner: prayer on/off thresholds, potion drinking with heal variance and a cooldown, death + respawn. Deterministic for a given RNG seed; `State()` snapshots it for logging. |
 
 The actual client integration (RuneLite plugin vs. vision bot) is deliberately
 kept out of this repo for now — the behavior layer is where the experiment
@@ -66,7 +67,7 @@ monotonicity + summary counts.
 ## Status / next
 
 - [ ] Wire `PlanDay` output to the client layer (RuneLite agent-server or vision bot)
-- [ ] Reflex layer for combat (prayer/potion/death rules)
+- [x] Reflex layer for combat (prayer/potion/death rules) — see `reflex.go`
 - [ ] JSONL file writer behind the ledger interface
 - [ ] One live week, then compare Botwatch outcomes against the knobs
 
