@@ -1,0 +1,13 @@
+# Binaries (the repo ships source; build locally with `go build`)
+/osrs-golden-god
+main
+*.exe
+
+# Go workspace / module caches when developing inside the repo
+go.work
+go.work.sum
+
+# Test artifacts
+*.test
+coverage.out
+dist/
