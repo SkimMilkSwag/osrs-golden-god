@@ -15,15 +15,17 @@ type Ledger struct {
 	Entries []Entry
 }
 
-// Entry is one logged event from a session.
+// Entry is one logged event from a session. The json tags pin the on-disk
+// wire format for the JSONL file — the ledger's rows are shared evidence, so
+// the field names there must not drift.
 type Entry struct {
 	// Tick is the OSRS game tick (600ms each) when the event was recorded.
-	Tick int
+	Tick int `json:"tick"`
 	// Kind is a short tag for the event class, e.g. "click", "keypress",
 	// "bank", "chat", "session-start", "session-end".
-	Kind string
+	Kind string `json:"kind"`
 	// Detail is free-form, human-readable context (e.g. "clicked Gnome at 5123").
-	Detail string
+	Detail string `json:"detail"`
 }
 
 var (
