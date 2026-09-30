@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -35,7 +36,13 @@ func main() {
 			os.Exit(1)
 		}
 	case "demo":
-		runDemo()
+		fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+		compact := fs.Bool("compact", false, "print the day as a single JSON object instead of the human-readable report")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		runDemo(*compact)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -51,8 +58,9 @@ func usage() {
 Usage:
   osrs-golden-god plan --min-hours F --max-hours F --sessions N [--seed S]
       Plan N sessions from [min, max] hours and print the run summary.
-  osrs-golden-god demo
+  osrs-golden-god demo [--compact]
       Print a synthetic day (planned sessions + sample ledger summary).
+      With --compact, print the day as a single JSON object for scripting.
 `)
 }
 
@@ -95,7 +103,11 @@ func runPlan(args []string) error {
 	return nil
 }
 
-func runDemo() {
+// runDemo prints a synthetic day: three planned sessions plus a sample
+// ledger summary, so a fresh clone has something visible without a client.
+// When compact is true it instead prints the day as a single JSON object —
+// same data, shaped for scripts (jq, dashboards, tests) rather than humans.
+func runDemo(compact bool) {
 	cfg := Config{
 		World:             251,
 		MinSessionHours:   2,
@@ -114,6 +126,40 @@ func runDemo() {
 		fmt.Fprintln(os.Stderr, "demo plan error:", err)
 		os.Exit(1)
 	}
+
+	if compact {
+		type sessionOut struct {
+			Index   int     `json:"index"`
+			Hours   float64 `json:"hours"`
+			Actions int     `json:"actions"`
+		}
+		out := struct {
+			World          int          `json:"world"`
+			Sessions       []sessionOut `json:"sessions"`
+			TotalHours     float64      `json:"total_hours"`
+			TotalActions   int          `json:"total_actions"`
+			DailyBudget    int          `json:"daily_budget"`
+			BudgetLeftOver int          `json:"budget_left_over"`
+		}{
+			World:        cfg.World,
+			Sessions:     make([]sessionOut, 0, len(res.Sessions)),
+			TotalHours:   res.TotalHours,
+			TotalActions: res.TotalActions,
+			DailyBudget:  cfg.DailyActionBudget,
+		}
+		for i, s := range res.Sessions {
+			out.Sessions = append(out.Sessions, sessionOut{Index: i + 1, Hours: s.Hours, Actions: s.Actions})
+		}
+		out.BudgetLeftOver = res.BudgetLeftOver
+		b, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "demo json error:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(stdout, string(b))
+		return
+	}
+
 	fmt.Fprintln(stdout, "== synthetic day ==")
 	fmt.Fprintf(stdout, "world %d, sessions planned:\n", cfg.World)
 	for i, s := range res.Sessions {

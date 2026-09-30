@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -56,10 +58,66 @@ func TestPlanSubcommandRejectsBadFlags(t *testing.T) {
 }
 
 func TestDemoSubcommandRuns(t *testing.T) {
-	out := captureStdout(t, runDemo)
+	out := captureStdout(t, func() { runDemo(false) })
 	for _, want := range []string{"synthetic day", "sample ledger summary"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("demo output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestDemoSubcommandCompactIsJSON(t *testing.T) {
+	out := captureStdout(t, func() { runDemo(true) })
+
+	var doc struct {
+		World    int `json:"world"`
+		Sessions []struct {
+			Index   int     `json:"index"`
+			Hours   float64 `json:"hours"`
+			Actions int     `json:"actions"`
+		} `json:"sessions"`
+		TotalHours   float64 `json:"total_hours"`
+		TotalActions int     `json:"total_actions"`
+		DailyBudget  int     `json:"daily_budget"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("compact demo output is not a JSON object: %v\n%s", err, out)
+	}
+	if doc.World != 251 || len(doc.Sessions) != 3 {
+		t.Errorf("world=%d sessions=%d, want world 251 and 3 sessions", doc.World, len(doc.Sessions))
+	}
+	var totalHours float64
+	totalActions := 0
+	for i, s := range doc.Sessions {
+		if s.Index != i+1 || s.Hours < 2 || s.Hours > 6 {
+			t.Errorf("session %d out of range: %+v", i, s)
+		}
+		if s.Actions < 0 || s.Actions > doc.DailyBudget {
+			t.Errorf("session %d actions %d outside [0, budget]: %+v", i, s.Actions, s)
+		}
+		totalHours += s.Hours
+		totalActions += s.Actions
+	}
+	if math.Abs(totalHours-doc.TotalHours) > 1e-9 || totalActions != doc.TotalActions {
+		t.Errorf("totals inconsistent: sum(%g, %d) vs reported (%g, %d)",
+			totalHours, totalActions, doc.TotalHours, doc.TotalActions)
+	}
+	if doc.DailyBudget == 300 && totalActions > 300 {
+		t.Errorf("daily budget exceeded: %d actions planned for a 300-action budget", totalActions)
+	}
+	if doc.DailyBudget != 300 {
+		t.Errorf("daily_budget = %d, want 300", doc.DailyBudget)
+	}
+	if strings.Contains(out, "synthetic day") || strings.Contains(out, "==") {
+		t.Errorf("compact mode leaked the human-readable report:\n%s", out)
+	}
+}
+
+func TestDemoCompactDeterministic(t *testing.T) {
+	run := func() string {
+		return captureStdout(t, func() { runDemo(true) })
+	}
+	if a, b := run(), run(); a != b {
+		t.Errorf("same demo produced different compact output:\n%s\n---\n%s", a, b)
 	}
 }
