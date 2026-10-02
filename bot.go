@@ -92,6 +92,12 @@ type RunResult struct {
 // matters is that sessions scale linearly with it so the budget math holds.
 const actionRatePerHour = 60
 
+// ActionRatePerHour exposes the baseline to other packages (e.g. the agent
+// server, which schedules client actions at a human-sustainable rate).
+func ActionRatePerHour() float64 {
+	return actionRatePerHour
+}
+
 // PlanDay turns a Config plus an explicit list of session lengths (in hours,
 // as a real bot would pick them at login time) into a RunResult. The lengths
 // are validated against the config and converted into per-session action
