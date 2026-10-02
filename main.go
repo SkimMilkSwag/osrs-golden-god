@@ -7,6 +7,8 @@ import (
 	"io"
 	"math/rand"
 	"os"
+
+	"github.com/SkimMilkSwag/osrs-golden-god/core"
 )
 
 // main is the thin CLI wrapper over the behavior layer. The two subcommands
@@ -76,18 +78,18 @@ func runPlan(args []string) error {
 	if *minH <= 0 || *maxH < *minH || *n <= 0 {
 		return fmt.Errorf("need --min-hours > 0, --max-hours >= min, --sessions > 0")
 	}
-	cfg := Config{
+	cfg := core.Config{
 		MinSessionHours: *minH,
 		MaxSessionHours: *maxH,
 		Efficiency:      0.85,
 		ClickSigmaMs:    40,
 	}
-	planner := NewSessionPlanner(cfg, rand.New(rand.NewSource(*seed)))
+	planner := core.NewSessionPlanner(cfg, rand.New(rand.NewSource(*seed)))
 	lengths := make([]float64, 0, *n)
 	for i := 0; i < *n; i++ {
 		lengths = append(lengths, planner.Next())
 	}
-	res, err := PlanDay(cfg, lengths)
+	res, err := core.PlanDay(cfg, lengths)
 	if err != nil {
 		return err
 	}
@@ -108,7 +110,7 @@ func runPlan(args []string) error {
 // When compact is true it instead prints the day as a single JSON object —
 // same data, shaped for scripts (jq, dashboards, tests) rather than humans.
 func runDemo(compact bool) {
-	cfg := Config{
+	cfg := core.Config{
 		World:             251,
 		MinSessionHours:   2,
 		MaxSessionHours:   6,
@@ -116,12 +118,12 @@ func runDemo(compact bool) {
 		ClickSigmaMs:      40,
 		DailyActionBudget: 300,
 	}
-	planner := NewSessionPlanner(cfg, rand.New(rand.NewSource(2026)))
+	planner := core.NewSessionPlanner(cfg, rand.New(rand.NewSource(2026)))
 	lengths := []float64{}
 	for i := 0; i < 3; i++ {
 		lengths = append(lengths, planner.Next())
 	}
-	res, err := PlanDay(cfg, lengths)
+	res, err := core.PlanDay(cfg, lengths)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "demo plan error:", err)
 		os.Exit(1)
@@ -173,10 +175,10 @@ func runDemo(compact bool) {
 
 	// Sample ledger summary: a short slice of what a session's event log looks
 	// like. Ticks are 600ms each; the span below is ~90 seconds of activity.
-	ledger := &Ledger{}
+	ledger := &core.Ledger{}
 	tick := 0
 	for _, kind := range []string{"session-start", "click", "keypress", "bank", "chat", "click"} {
-		if err := ledger.Append(Entry{Tick: tick, Kind: kind, Detail: "demo"}); err != nil {
+		if err := ledger.Append(core.Entry{Tick: tick, Kind: kind, Detail: "demo"}); err != nil {
 			fmt.Fprintln(os.Stderr, "demo ledger error:", err)
 			os.Exit(1)
 		}
