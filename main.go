@@ -85,10 +85,7 @@ func runPlan(args []string) error {
 		ClickSigmaMs:    40,
 	}
 	planner := core.NewSessionPlanner(cfg, rand.New(rand.NewSource(*seed)))
-	lengths := make([]float64, 0, *n)
-	for i := 0; i < *n; i++ {
-		lengths = append(lengths, planner.Next())
-	}
+	lengths := planner.Sessions(*n)
 	res, err := core.PlanDay(cfg, lengths)
 	if err != nil {
 		return err

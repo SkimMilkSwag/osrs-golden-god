@@ -155,3 +155,38 @@ func TestSessionPlannerSeededDeterminism(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionPlannerSessionsDrawsAllInOneCall(t *testing.T) {
+	c := validConfig()
+	p := NewSessionPlanner(c, rand.New(rand.NewSource(99)))
+	day := p.Sessions(10)
+	if len(day) != 10 {
+		t.Fatalf("Sessions(10) returned %d lengths", len(day))
+	}
+	for i, h := range day {
+		if h < c.MinSessionHours || h > c.MaxSessionHours {
+			t.Fatalf("session %d = %g outside [%g, %g]", i, h, c.MinSessionHours, c.MaxSessionHours)
+		}
+		if i > 0 && h == day[i-1] {
+			t.Fatalf("session %d repeated previous length %g", i, h)
+		}
+	}
+	// A fresh planner with the same seed must produce the identical day —
+	// the helper must not consume extra RNG state on its own.
+	p2 := NewSessionPlanner(c, rand.New(rand.NewSource(99)))
+	day2 := p2.Sessions(10)
+	for i := range day {
+		if day[i] != day2[i] {
+			t.Fatalf("seeded Sessions diverged at %d: %g vs %g", i, day[i], day2[i])
+		}
+	}
+	// And it must agree with the Next() loop byte for byte, since a client
+	// driving sessions one at a time should see the same plan as one that
+	// draws the whole day up front.
+	p3 := NewSessionPlanner(c, rand.New(rand.NewSource(99)))
+	for i := range day {
+		if got := p3.Next(); got != day[i] {
+			t.Fatalf("Next() loop diverged from Sessions at %d: %g vs %g", i, got, day[i])
+		}
+	}
+}

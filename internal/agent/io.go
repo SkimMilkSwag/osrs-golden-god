@@ -3,34 +3,47 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 )
 
 // ReadMsg decodes one wire message from r, skipping blank lines. It returns
 // io.EOF when r is exhausted so a caller can loop until the other side closes
-// the pipe.
+// the pipe. A final line without a trailing newline (a peer that died
+// mid-write) is still returned: its bytes were real, and whether they parse
+// is the caller's concern.
 func ReadMsg(r io.Reader) (*Msg, error) {
 	br := bufio.NewReader(r)
+	var line []byte
 	for {
-		line, err := br.ReadBytes('\n')
-		trimmed := line
-		if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\n' {
-			trimmed = trimmed[:len(trimmed)-1] // strip trailing newline
+		n, err := br.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			// A real transport failure (broken pipe, etc.): surface it —
+			// whatever partial bytes arrived die with the connection.
+			return nil, err
 		}
-		if len(trimmed) == 0 {
-			// Blank line (or empty read). Tolerate a final line without a
-			// trailing newline by treating EOF-with-data as data, not error.
-			if err == nil || err != io.EOF {
-				continue
+		line = append(line, n...)
+		if len(line) == 0 {
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
 			}
-			return nil, io.EOF
+			continue // empty read, no error: keep going
 		}
-		m, perr := ReadMsgLine(trimmed)
-		if perr != nil {
-			return nil, perr
+		if line[len(line)-1] != '\n' {
+			break // final line without a trailing newline (EOF-with-data)
 		}
-		return m, nil
+		trimmed := line[:len(line)-1] // strip trailing newline
+		if len(trimmed) == 0 {
+			continue // blank line: skip
+		}
+		return ReadMsgLine(trimmed)
 	}
+	if len(line) == 0 || line[len(line)-1] == '\n' {
+		// The final read ended on a newline (or nothing arrived): the peer's
+		// last line was complete, so there is no partial message to salvage.
+		return nil, io.EOF
+	}
+	return ReadMsgLine(line)
 }
 
 // ReadMsgLine decodes a single wire message from raw line bytes. It is split

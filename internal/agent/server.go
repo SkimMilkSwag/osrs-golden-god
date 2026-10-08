@@ -53,11 +53,53 @@ type SessionPlan struct {
 	Actions int
 }
 
+// FromRun converts a PlanDay result into the session plans Run executes. The
+// conversion is the only place where the behavior layer's output meets the
+// wire contract, which keeps both sides independently testable.
+func FromRun(r *core.RunResult) []SessionPlan {
+	out := make([]SessionPlan, len(r.Sessions))
+	for i, s := range r.Sessions {
+		out[i] = SessionPlan{Hours: s.Hours, Actions: s.Actions}
+	}
+	return out
+}
+
+// RunDay plans a day with the given session lengths and executes it against
+// the client in one call — the common path where nothing else owns the
+// planning. It returns the plan alongside the error so a partial run (a
+// client drop mid-day) still hands back what was planned, which is exactly
+// the evidence a ban appeal wants.
+func (s *Server) RunDay(cfg core.Config, sessionHours []float64, in io.Reader, out io.Writer) (*core.RunResult, error) {
+	res, err := core.PlanDay(cfg, sessionHours)
+	if err != nil {
+		return res, fmt.Errorf("plan: %w", err)
+	}
+	if err := s.Run(in, out, FromRun(res)); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// RunDaySeeded is RunDay for callers that also own session-length drawing: it
+// draws the lengths with an injectable planner (so tests and demos are
+// deterministic) and then plans and executes exactly as RunDay does.
+func (s *Server) RunDaySeeded(planner *core.SessionPlanner, n int, in io.Reader, out io.Writer) (*core.RunResult, error) {
+	return s.RunDay(planner.Config(), planner.Sessions(n), in, out)
+}
+
 // Run drives the full conversation with the client: hello handshake, then for
 // each planned session a session-start / action* / session-end cycle, ending
 // with shutdown. Actions are generated locally and logged to the ledger with
 // strictly increasing ticks; a misbehaving peer (wrong kind on the wire) fails
 // the run instead of being silently ignored.
+//
+// A session's end is only *confirmed* once the next session actually begins —
+// like a real client that never logs out mid-day, you can't know a session
+// ended until continuity is proven. So runSession performs its start + actions
+// and reports where the end will land, and Run appends that session-end entry
+// right before starting the next session (or after the last one on clean
+// completion). A mid-day drop therefore leaves the partial ledger ending on
+// the last completed action, not a session-end that was never confirmed.
 //
 // The tick model is the OSRS game clock: 10 ticks per second, 600ms each. One
 // action consumes one second of game time — at the 60 actions/hour baseline
@@ -68,10 +110,6 @@ func (s *Server) Run(in io.Reader, out io.Writer, sessions []SessionPlan) error 
 	}
 	if s.Ledger == nil {
 		return errors.New("ledger is nil")
-	}
-	kinds := s.ActionKinds
-	if len(kinds) == 0 {
-		kinds = defaultActionKinds
 	}
 
 	// tick is the game tick the current session is at; sessions continue from
@@ -91,12 +129,26 @@ func (s *Server) Run(in io.Reader, out io.Writer, sessions []SessionPlan) error 
 		return fmt.Errorf("expected hello first, got %q", hello.Kind)
 	}
 
+	var (
+		pendingEnd  int64
+		pendingHrs  float64
+		havePending bool
+	)
 	for i, sp := range sessions {
 		if sp.Actions < 0 {
 			return fmt.Errorf("session %d: negative action count (%d)", i+1, sp.Actions)
 		}
-		if err := s.runSession(out, &tick, sp); err != nil {
+		end, err := s.runSession(in, out, &tick, sp, havePending, pendingEnd, pendingHrs)
+		if err != nil {
 			return fmt.Errorf("session %d: %w", i+1, err)
+		}
+		pendingEnd, pendingHrs, havePending = end, sp.Hours, true
+	}
+
+	// Clean completion: the last session's end is confirmed at shutdown.
+	if havePending {
+		if err := s.Ledger.Append(core.Entry{Tick: int(pendingEnd), Kind: "session-end", Detail: fmt.Sprintf("%.1fh", pendingHrs)}); err != nil {
+			return fmt.Errorf("confirm final session end: %w", err)
 		}
 	}
 
@@ -106,38 +158,74 @@ func (s *Server) Run(in io.Reader, out io.Writer, sessions []SessionPlan) error 
 	return nil
 }
 
-// runSession executes one session: announces it, performs its actions (each
-// logged to the ledger and echoed to the client as an Action message), then
-// closes it out. The session-start is logged at the tick the session begins;
-// the session-end one tick-second after the last action.
-func (s *Server) runSession(out io.Writer, tick *int, sp SessionPlan) error {
+// runSession executes one session. It first confirms the PREVIOUS session's
+// end — but only once this session's keepalive pong is received, proving the
+// client survived to start again (a mid-day drop at this keepalive therefore
+// leaves the prior session's end unconfirmed, so the ledger ends on its last
+// action). Then it announces the session and performs its actions (each logged
+// to the ledger and echoed to the client as an Action message). It returns the
+// tick at which this session's end marker will land. The wire clock advances
+// one second for every action; the returned end sits one second after the last
+// action (or one second after the start for an empty, zero-action session).
+func (s *Server) runSession(in io.Reader, out io.Writer, tick *int, sp SessionPlan, hadPrev bool, prevEnd int64, prevHrs float64) (int64, error) {
+	// Keepalive: a client that died between sessions won't answer its ping, so
+	// a mid-day drop fails the run at the session boundary with the partial
+	// ledger still intact — exactly the evidence a ban appeal wants.
+	if err := WriteMsg(out, &Msg{Kind: Ping}); err != nil {
+		return 0, fmt.Errorf("write ping: %w", err)
+	}
+	pong, err := ReadMsg(in)
+	if err != nil {
+		return 0, fmt.Errorf("read pong: %w", err)
+	}
+	if pong.Kind != Pong {
+		return 0, fmt.Errorf("expected pong before session start, got %q", pong.Kind)
+	}
+
+	// The keepalive pong just proved the client survived between sessions, so
+	// the previous session's end is now confirmed and can be written to the
+	// ledger. (If the client had died here, we'd have returned above and its
+	// prior session would stay unconfirmed.)
+	if hadPrev {
+		if err := s.Ledger.Append(core.Entry{Tick: int(prevEnd), Kind: "session-end", Detail: fmt.Sprintf("%.1fh", prevHrs)}); err != nil {
+			return 0, fmt.Errorf("confirm previous session end: %w", err)
+		}
+	}
+
 	if err := WriteMsg(out, &Msg{Kind: SessionStart, Session: &SessionSpec{Hours: sp.Hours, Actions: sp.Actions}}); err != nil {
-		return fmt.Errorf("write session-start: %w", err)
+		return 0, fmt.Errorf("write session-start: %w", err)
 	}
 
 	if err := s.Ledger.Append(core.Entry{Tick: *tick, Kind: "session-start", Detail: fmt.Sprintf("%.1fh, ~%d actions", sp.Hours, sp.Actions)}); err != nil {
-		return fmt.Errorf("ledger session-start: %w", err)
+		return 0, fmt.Errorf("ledger session-start: %w", err)
 	}
 
 	for a := 0; a < sp.Actions; a++ {
+		if err := WriteMsg(out, &Msg{Kind: Action}); err != nil {
+			return 0, fmt.Errorf("write action %d: %w", a+1, err)
+		}
 		*tick += 10 // one second of game time per action
 		kind := s.ActionKinds[s.rng.Intn(len(s.ActionKinds))]
 		detail := fmt.Sprintf("%s #%d", kind, a+1)
 		if err := s.Ledger.Append(core.Entry{Tick: *tick, Kind: kind, Detail: detail}); err != nil {
-			return fmt.Errorf("ledger action %d: %w", a+1, err)
-		}
-		if err := WriteMsg(out, &Msg{Kind: Action, Tick: *tick, Detail: detail}); err != nil {
-			return fmt.Errorf("write action %d: %w", a+1, err)
+			return 0, fmt.Errorf("ledger action %d: %w", a+1, err)
 		}
 	}
 
-	end := *tick + 10 // session-end is logged one second after the last action
-	*tick = end
+	// The session-end marker lands one full second AFTER the last action (the
+	// "one tick-second after the last action" design): for a non-empty session
+	// that is lastAction + 10, and the ledger's tick clock then advances past it
+	// so the NEXT session's start is strictly greater than this one's end. An
+	// empty (zero-action) session has no last action; its end marker sits one
+	// second after its own start, still keeping the sequence strictly increasing.
+	lastAction := *tick // *tick already reflects every action performed
+	end := int64(lastAction + 10)
+	if sp.Actions == 0 {
+		end = int64(*tick) + 10 // no actions ran: end one second after session-start
+	}
+	*tick = lastAction + 20 // leave the clock past this session so the next start > this end
 	if err := WriteMsg(out, &Msg{Kind: SessionEnd}); err != nil {
-		return fmt.Errorf("write session-end: %w", err)
+		return 0, fmt.Errorf("write session-end: %w", err)
 	}
-	if err := s.Ledger.Append(core.Entry{Tick: end, Kind: "session-end", Detail: fmt.Sprintf("%.1fh", sp.Hours)}); err != nil {
-		return fmt.Errorf("ledger session-end: %w", err)
-	}
-	return nil
+	return end, nil
 }
