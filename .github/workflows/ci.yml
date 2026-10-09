@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: vet + test (Go ${{ matrix.go }})
+    name: vet + fmt + test (Go ${{ matrix.go }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,6 +25,15 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: go test
         run: go test ./... -count=1
