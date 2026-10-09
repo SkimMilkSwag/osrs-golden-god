@@ -33,7 +33,8 @@ func TestLedgerSummarizeCountsByKind(t *testing.T) {
 		{Tick: 30, Kind: "keypress"},
 		{Tick: 40, Kind: "bank"},
 		{Tick: 50, Kind: "chat"},
-		{Tick: 60, Kind: "click"},
+		{Tick: 60, Kind: "glance"},
+		{Tick: 70, Kind: "click"},
 	}
 	for i := range events {
 		if err := l.Append(events[i]); err != nil {
@@ -56,8 +57,11 @@ func TestLedgerSummarizeCountsByKind(t *testing.T) {
 	if st.Chats != 1 {
 		t.Errorf("Chats = %d, want 1", st.Chats)
 	}
-	if st.DurationTicks != 60 {
-		t.Errorf("DurationTicks = %d, want 60 (tick 0 to tick 60)", st.DurationTicks)
+	if st.Glances != 1 {
+		t.Errorf("Glances = %d, want 1", st.Glances)
+	}
+	if st.DurationTicks != 70 {
+		t.Errorf("DurationTicks = %d, want 70 (tick 0 to tick 70)", st.DurationTicks)
 	}
 }
 

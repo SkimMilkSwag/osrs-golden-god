@@ -51,6 +51,7 @@ type Stats struct {
 	Keypresses    int
 	Banks         int
 	Chats         int
+	Glances       int // stats-tab glances (personality events)
 	DurationTicks int // span from first to last entry, inclusive
 }
 
@@ -68,6 +69,8 @@ func (l *Ledger) Summarize() Stats {
 			s.Banks++
 		case "chat":
 			s.Chats++
+		case "glance":
+			s.Glances++
 		case "session-start":
 			s.Sessions++
 		}
