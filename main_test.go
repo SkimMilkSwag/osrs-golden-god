@@ -121,3 +121,80 @@ func TestDemoCompactDeterministic(t *testing.T) {
 		t.Errorf("same demo produced different compact output:\n%s\n---\n%s", a, b)
 	}
 }
+
+func TestHabitsSubcommandOutput(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := runHabits([]string{}); err != nil {
+			t.Fatalf("runHabits: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"personality-actions schedule (1h session)",
+		"intervals: glance ~300s, bank ~900s, chat ~1200s",
+		"stats-tab glance", "bank visit", "chat 'ty'",
+		"total:",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("habits output missing %q:\n%s", want, out)
+		}
+	}
+	// Every scheduled event must fit inside the hour.
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "t=") {
+			continue
+		}
+		numStr := strings.TrimPrefix(trimmed, "t=")
+		var s int
+		for _, c := range numStr {
+			if c < '0' || c > '9' {
+				break
+			}
+			s = s*10 + int(c-'0')
+		}
+		if s > 3600 {
+			t.Errorf("event at t=%ds is past the 1h session end", s)
+		}
+	}
+}
+
+func TestHabitsSubcommandRejectsBadIntervals(t *testing.T) {
+	captureStdout(t, func() {
+		if err := runHabits([]string{"--glance-every", "0"}); err == nil {
+			t.Fatal("expected error for zero glance interval")
+		}
+	})
+}
+
+func TestHabitsSubcommandDeterministicForDefaults(t *testing.T) {
+	run := func() string {
+		return captureStdout(t, func() {
+			if err := runHabits([]string{}); err != nil {
+				t.Fatalf("runHabits: %v", err)
+			}
+		})
+	}
+	if a, b := run(), run(); a != b {
+		t.Errorf("same defaults produced different schedules:\n--- a ---\n%s\n--- b ---\n%s", a, b)
+	}
+}
+
+func TestHabitsSubcommandTighterIntervalsScheduleMore(t *testing.T) {
+	count := func(args []string) int {
+		out := captureStdout(t, func() {
+			if err := runHabits(args); err != nil {
+				t.Fatalf("runHabits: %v", err)
+			}
+		})
+		var n int
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "t=") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count([]string{"--glance-every", "30", "--bank-every", "40", "--chat-every", "50"}); n < 30 {
+		t.Errorf("tight intervals scheduled only %d events in an hour, want at least ~36 (3600/100 * 3 classes)", n)
+	}
+}
