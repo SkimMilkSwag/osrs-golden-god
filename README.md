@@ -23,12 +23,15 @@ game client attached.
 |------|--------------|
 | `bot.go` | `Config` + validation, `Session`, `RunResult`, `PlanDay` — the core planning math (session lengths → action estimates under the 85% efficiency rule, with an optional daily action budget). |
 | `planner.go` | `SessionPlanner` — draws session durations from the configured range, never repeating the previous one (the "never identical twice" rule). RNG is injectable for tests. |
-| `ledger.go` | `Ledger` / `Entry` / `Summarize` — append-only event log with strictly-increasing-tick enforcement and a kind-based summary (clicks, keypresses, banks, chats, session count, time span). |
+| `ledger.go` | `Ledger` / `Entry` / `Summarize` — append-only event log with strictly-increasing-tick enforcement and a kind-based summary (clicks, keypresses, banks, chats, stats-tab glances, session count, time span). |
+| `ledger_jsonl.go` | `JSONLLedger` — the ledger backed by an append-only `.jsonl` file: one compact JSON line per entry (the pinned `tick`/`kind`/`detail` wire format), `ReadJSONL` validates on-disk monotonicity and hands back the last tick for reseeding. |
+| `personality.go` | `PersonalityGenerator` — schedules the "human" noise: stats-tab glances, bank visits, chat messages, each drawn at Gaussian intervals (a uniform random delay is itself a fingerprint). Deterministic for an injected RNG; `Schedule()` returns every event that fits inside a session. |
 | `reflex.go` | `Reflex` — the fast rule-based layer under the planner: prayer on/off thresholds, potion drinking with heal variance and a cooldown, death + respawn. Deterministic for a given RNG seed; `State()` snapshots it for logging. |
+| `internal/agent/` | Client-layer adapter: JSON-over-stdio wire protocol (`Msg` envelope), and `Server.Run` — the executor that drives a game client through planned sessions (hello handshake, keepalive pings at session boundaries, confirmed session-ends) while interleaving personality events and feeding everything to the ledger. |
 
-The actual client integration (RuneLite plugin vs. vision bot) is deliberately
-kept out of this repo for now — the behavior layer is where the experiment
-lives, and it should be swappable.
+The client integration (RuneLite agent-server over stdio) lives in
+`internal/agent/`: the behavior layer stays in `core`, the adapter only
+executes — so swapping clients never touches the planning math.
 
 ## Running
 
@@ -36,10 +39,13 @@ lives, and it should be swappable.
 go test ./...
 go run . plan --min-hours 2 --max-hours 6 --sessions 3
 go run . demo   # prints a synthetic day: planned sessions + a sample ledger summary
+go run . habits # prints a personality-actions schedule for a 1h session
 ```
 
 `plan` is deterministic for a fixed session-length list; `demo` uses a seeded
-RNG so its output is stable across runs (handy for diffing after a change).
+RNG so its output is stable across runs (handy for diffing after a change);
+`habits` takes mean intervals (`--glance-every`, `--bank-every`,
+`--chat-every`) and prints the scheduled human actions for an hour.
 
 ## The anti-ban playbook, condensed
 
@@ -56,19 +62,31 @@ into `Config`:
   in one place.
 - **Daily action budget** — caps total volume independent of session count,
   so a long session can't quietly blow the day's number.
+- **Personality actions** — a bot that only ever performs its task is a
+  fingerprint. `personality.go` schedules stats-tab glances, bank visits and
+  chat at Gaussian intervals (uniform random delay is itself a distinctive
+  behavioral pattern); the agent-server executor interleaves them into each
+  session's action stream.
 
 ## Testing
 
 Pure Go, stdlib only: `go test ./...`. Tests pin the planning math (action
 estimates under the efficiency factor, budget exhaustion, error paths), the
-planner's no-repeat rule (with a seeded RNG), and the ledger's tick
-monotonicity + summary counts.
+planner's no-repeat rule (with a seeded RNG), the ledger's tick monotonicity
++ summary counts (including JSONL round-trips through a real file), and the
+personality generator (seeded determinism, class interleaving, schedule
+bounds, direct loggability into the ledger). The agent layer's tests drive a
+scriptable wire peer and assert exact conversation shape: handshake,
+keepalive pings at session boundaries, confirmed session-ends, mid-day drop
+recovery with the partial ledger intact, and personality events appearing on
+both the wire and the ledger.
 
 ## Status / next
 
-- [ ] Wire `PlanDay` output to the client layer (RuneLite agent-server or vision bot)
+- [x] Wire `PlanDay` output to the client layer (RuneLite agent-server over stdio) — `internal/agent/`
 - [x] Reflex layer for combat (prayer/potion/death rules) — see `reflex.go`
-- [ ] JSONL file writer behind the ledger interface
+- [x] JSONL file writer behind the ledger interface — see `core/ledger_jsonl.go`
+- [x] Personality-actions generator (glances/bank/chat at Gaussian intervals, interleaved by the executor) — `core/personality.go`
 - [ ] One live week, then compare Botwatch outcomes against the knobs
 
 ## License
