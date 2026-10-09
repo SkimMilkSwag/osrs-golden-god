@@ -11,6 +11,39 @@ import (
 	"github.com/SkimMilkSwag/osrs-golden-god/core"
 )
 
+// kindFromLine extracts the "kind" field of a wire line without importing
+// encoding/json into this file (the fake client deals in raw bytes on purpose).
+func kindFromLine(line string) string {
+	if i := strings.Index(line, `"kind":"`); i >= 0 {
+		rest := line[i+len(`"kind":"`):]
+		if j := strings.Index(rest, `"`); j >= 0 {
+			return rest[:j]
+		}
+	}
+	return ""
+}
+
+// actionLineCount returns how many wire lines are action messages.
+func actionLineCount(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		if kindFromLine(l) == string(Action) {
+			n++
+		}
+	}
+	return n
+}
+
+// kindCounts tallies ledger entries by kind, so tests can assert exactly how
+// many of each habit class a run produced.
+func kindCounts(l *core.Ledger) map[string]int {
+	m := map[string]int{}
+	for _, e := range l.Entries {
+		m[e.Kind]++
+	}
+	return m
+}
+
 // fakeClient is a scriptable wire peer: it returns the queued messages in
 // order, then io.EOF. It records everything the server writes so tests can
 // assert on the exact conversation that happened. The reader/writer adapters
@@ -294,5 +327,86 @@ func TestRunDayMiddayDropKeepsPartialLedger(t *testing.T) {
 	}
 	if got2 == nil || len(got2.Sessions) != 2 {
 		t.Errorf("partial run must still hand back the full plan, got %+v", got2)
+	}
+}
+
+func TestRunWithPersonalityEventsInterleaved(t *testing.T) {
+	// Tight habit intervals so a short session (60 actions ≈ 1 min of wire
+	// clock) schedules several events: means ~10-15s, small σ. A 40-second
+	// chat mean would land past the action stream and get dropped, so keep it
+	// well inside the ~70s budget a 60-action session leaves.
+	pers := &core.PersonalityConfig{
+		GlanceEvery: 12, GlanceSigma: 2,
+		BankEvery: 15, BankSigma: 2,
+		ChatEvery: 20, ChatSigma: 3,
+	}
+
+	client := &fakeClient{in: []Msg{{Kind: Hello}, {Kind: Pong}}}
+	srv, ledger := newTestServer(42)
+	srv.Personality = pers
+	err := srv.Run(inReader{c: client}, outWriter{c: client}, []SessionPlan{{Hours: 1.0, Actions: 60}})
+	if err != nil {
+		t.Fatalf("Run with personality: %v", err)
+	}
+
+	st := ledger.Summarize()
+	if st.Sessions != 1 {
+		t.Errorf("summary sessions = %d, want 1", st.Sessions)
+	}
+
+	kinds := kindCounts(ledger)
+	workActions := kinds["click"] + kinds["keypress"]
+	if workActions != 60 {
+		t.Errorf("work actions logged = %d, want exactly 60 (the plan's count)", workActions)
+	}
+	persEvents := len(ledger.Entries) - 2 - workActions // minus session-start and session-end markers; only habits remain
+	if persEvents <= 0 {
+		t.Fatalf("no personality events were emitted (kinds=%v), want habits in a 60-action session with tight intervals", kinds)
+	}
+
+	// The wire stream must carry every personality event as an action line
+	// (with its habit detail), on top of the 60 plain work-action lines.
+	lines := client.lines()
+	withDetail := 0
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, `"detail":"stats-tab glance`),
+			strings.Contains(l, `"detail":"bank visit`),
+			strings.Contains(l, `"detail":"chat 'ty'`):
+			withDetail++
+		}
+	}
+	if withDetail != persEvents {
+		t.Errorf("wire carried %d personality action lines, ledger logged %d events — must match", withDetail, persEvents)
+	}
+	if got := actionLineCount(lines); got != 60+persEvents {
+		t.Errorf("wire carried %d total action lines, want %d (60 work + %d personality)", got, 60+persEvents, persEvents)
+	}
+
+	// Every personality entry's detail must name its habit; a full 1h session
+	// with these means must schedule all three classes.
+	if kinds["glance"] == 0 || kinds["bank"] == 0 || kinds["chat"] == 0 {
+		t.Errorf("habit class coverage = %v, want at least one glance, one bank visit and one chat", kinds)
+	}
+	for _, e := range ledger.Entries {
+		if e.Kind == "glance" && !strings.Contains(e.Detail, "stats-tab glance") {
+			t.Errorf("glance entry detail %q doesn't name the habit", e.Detail)
+		}
+	}
+
+	// Nil Personality must behave exactly like before: only work actions.
+	client2 := &fakeClient{in: []Msg{{Kind: Hello}, {Kind: Pong}}}
+	srv2, ledger2 := newTestServer(42) // same seed -> same work-action stream
+	err = srv2.Run(inReader{c: client2}, outWriter{c: client2}, []SessionPlan{{Hours: 1.0, Actions: 60}})
+	if err != nil {
+		t.Fatalf("Run without personality: %v", err)
+	}
+	baseline := kindCounts(ledger2)
+	if baseline["click"]+baseline["keypress"] != 60 || baseline["glance"]+baseline["bank"]+baseline["chat"] != 0 {
+		t.Errorf("baseline (nil Personality) kinds = %v, want exactly 60 work actions and zero habits", baseline)
+	}
+	// session-start + 60 actions + the confirmed session-end marker.
+	if len(ledger2.Entries) != 1+60+1 {
+		t.Errorf("baseline ledger = %d entries, want %d (session-start + 60 actions + session-end)", len(ledger2.Entries), 1+60+1)
 	}
 }

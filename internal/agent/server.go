@@ -25,6 +25,13 @@ type Server struct {
 	// Defaults to a small bank-stander-ish set when empty.
 	ActionKinds []string
 
+	// Personality, when non-nil, schedules the human-habit events (stats-tab
+	// glances, bank visits, chat) that are interleaved into each session's
+	// action stream and reported to the client as their own Action lines. A
+	// nil Personality disables them — the executor then behaves exactly as
+	// it did before this knob existed, which keeps existing wire tests stable.
+	Personality *core.PersonalityConfig
+
 	rng *rand.Rand
 }
 
@@ -163,9 +170,10 @@ func (s *Server) Run(in io.Reader, out io.Writer, sessions []SessionPlan) error 
 // client survived to start again (a mid-day drop at this keepalive therefore
 // leaves the prior session's end unconfirmed, so the ledger ends on its last
 // action). Then it announces the session and performs its actions (each logged
-// to the ledger and echoed to the client as an Action message). It returns the
-// tick at which this session's end marker will land. The wire clock advances
-// one second for every action; the returned end sits one second after the last
+// to the ledger and echoed to the client as an Action message), interleaving
+// any scheduled personality events in game-tick order. It returns the tick at
+// which this session's end marker will land. The wire clock advances one
+// second for every action; the returned end sits one second after the last
 // action (or one second after the start for an empty, zero-action session).
 func (s *Server) runSession(in io.Reader, out io.Writer, tick *int, sp SessionPlan, hadPrev bool, prevEnd int64, prevHrs float64) (int64, error) {
 	// Keepalive: a client that died between sessions won't answer its ping, so
@@ -200,6 +208,18 @@ func (s *Server) runSession(in io.Reader, out io.Writer, tick *int, sp SessionPl
 		return 0, fmt.Errorf("ledger session-start: %w", err)
 	}
 
+	// Personality events are scheduled for the whole session up front, in the
+	// generator's own game-tick clock (session start = tick 0). Work actions
+	// advance the wire clock one second each; an event is emitted the moment
+	// the wire clock crosses its scheduled second. Events scheduled past the
+	// session's action stream (long habits vs short sessions) are dropped:
+	// they simply didn't happen this session.
+	var pers []core.PersonalityEvent
+	if s.Personality != nil {
+		gen := core.NewPersonalityGenerator(*s.Personality, rand.New(rand.NewSource(s.rng.Int63())), sp.Hours)
+		pers = gen.Schedule()
+	}
+	nextPers := 0
 	for a := 0; a < sp.Actions; a++ {
 		if err := WriteMsg(out, &Msg{Kind: Action}); err != nil {
 			return 0, fmt.Errorf("write action %d: %w", a+1, err)
@@ -209,6 +229,24 @@ func (s *Server) runSession(in io.Reader, out io.Writer, tick *int, sp SessionPl
 		detail := fmt.Sprintf("%s #%d", kind, a+1)
 		if err := s.Ledger.Append(core.Entry{Tick: *tick, Kind: kind, Detail: detail}); err != nil {
 			return 0, fmt.Errorf("ledger action %d: %w", a+1, err)
+		}
+
+		// Emit every personality event whose scheduled second has now passed.
+		// Each event consumes a fresh second of game time: the wire clock only
+		// ever moves forward, and a habit that "happens at" the same moment as
+		// another (two events crossing in one action) still occupies its own
+		// tick-second when logged — otherwise the ledger's strict-tick rule
+		// would reject the second append at the same tick.
+		for nextPers < len(pers) && pers[nextPers].Tick <= *tick {
+			ev := pers[nextPers]
+			nextPers++
+			*tick += 10 // this event takes the next second of game time
+			if err := WriteMsg(out, &Msg{Kind: Action, Tick: *tick, Detail: ev.Detail}); err != nil {
+				return 0, fmt.Errorf("write personality event: %w", err)
+			}
+			if err := s.Ledger.Append(core.Entry{Tick: *tick, Kind: ev.Kind, Detail: ev.Detail}); err != nil {
+				return 0, fmt.Errorf("ledger personality event: %w", err)
+			}
 		}
 	}
 
