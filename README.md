@@ -23,7 +23,7 @@ game client attached.
 |------|--------------|
 | `bot.go` | `Config` + validation, `Session`, `RunResult`, `PlanDay` — the core planning math (session lengths → action estimates under the 85% efficiency rule, with an optional daily action budget). |
 | `planner.go` | `SessionPlanner` — draws session durations from the configured range, never repeating the previous one (the "never identical twice" rule). RNG is injectable for tests. |
-| `ledger.go` | `Ledger` / `Entry` / `Summarize` — append-only event log with strictly-increasing-tick enforcement and a kind-based summary (clicks, keypresses, banks, chats, stats-tab glances, session count, time span). |
+| `ledger.go` | `Ledger` / `Entry` / `Summarize` / `KindCounts` / `BuildReport` — append-only event log with strictly-increasing-tick enforcement. `Summarize` is a named-fields projection of the per-kind tally; `BuildReport` renders the daily report (one row per kind in first-seen order, totals, time span). |
 | `ledger_jsonl.go` | `JSONLLedger` — the ledger backed by an append-only `.jsonl` file: one compact JSON line per entry (the pinned `tick`/`kind`/`detail` wire format), `ReadJSONL` validates on-disk monotonicity and hands back the last tick for reseeding. |
 | `personality.go` | `PersonalityGenerator` — schedules the "human" noise: stats-tab glances, bank visits, chat messages, each drawn at Gaussian intervals (a uniform random delay is itself a fingerprint). Deterministic for an injected RNG; `Schedule()` returns every event that fits inside a session. |
 | `reflex.go` | `Reflex` — the fast rule-based layer under the planner: prayer on/off thresholds, potion drinking with heal variance and a cooldown, death + respawn. Deterministic for a given RNG seed; `State()` snapshots it for logging. |
@@ -40,12 +40,17 @@ go test ./...
 go run . plan --min-hours 2 --max-hours 6 --sessions 3
 go run . demo   # prints a synthetic day: planned sessions + a sample ledger summary
 go run . habits # prints a personality-actions schedule for a 1h session
+go run . report --file <day>.jsonl [--json]
 ```
 
 `plan` is deterministic for a fixed session-length list; `demo` uses a seeded
 RNG so its output is stable across runs (handy for diffing after a change);
 `habits` takes mean intervals (`--glance-every`, `--bank-every`,
 `--chat-every`) and prints the scheduled human actions for an hour.
+`report` reads one day's `.jsonl` ledger file (validating every line and the
+tick monotonicity on disk) and prints its per-kind daily report — one
+`kind: count` row in first-seen order plus totals and the session span — or,
+with `--json`, a single JSON object for scripts.
 
 ## The anti-ban playbook, condensed
 
@@ -73,9 +78,11 @@ into `Config`:
 Pure Go, stdlib only: `go test ./...`. Tests pin the planning math (action
 estimates under the efficiency factor, budget exhaustion, error paths), the
 planner's no-repeat rule (with a seeded RNG), the ledger's tick monotonicity
-+ summary counts (including JSONL round-trips through a real file), and the
-personality generator (seeded determinism, class interleaving, schedule
-bounds, direct loggability into the ledger). The agent layer's tests drive a
++ summary counts (including JSONL round-trips through a real file and the
+per-kind daily report — rows, totals, and its `--json` output pinned against
+the same data). The personality generator's tests pin seeded determinism,
+class interleaving, schedule bounds, and direct loggability into the ledger.
+The agent layer's tests drive a
 scriptable wire peer and assert exact conversation shape: handshake,
 keepalive pings at session boundaries, confirmed session-ends, mid-day drop
 recovery with the partial ledger intact, and personality events appearing on
@@ -87,6 +94,7 @@ both the wire and the ledger.
 - [x] Reflex layer for combat (prayer/potion/death rules) — see `reflex.go`
 - [x] JSONL file writer behind the ledger interface — see `core/ledger_jsonl.go`
 - [x] Personality-actions generator (glances/bank/chat at Gaussian intervals, interleaved by the executor) — `core/personality.go`
+- [x] Per-kind daily report from a day's ledger file — `report` subcommand (`--json` for scripts), built on `Ledger.BuildReport`
 - [ ] One live week, then compare Botwatch outcomes against the knobs
 
 ## License
