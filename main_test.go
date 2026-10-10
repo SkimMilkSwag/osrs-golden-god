@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/SkimMilkSwag/osrs-golden-god/core"
 )
 
 // captureStdout runs fn and returns whatever it printed to the package-level
@@ -196,5 +200,137 @@ func TestHabitsSubcommandTighterIntervalsScheduleMore(t *testing.T) {
 	}
 	if n := count([]string{"--glance-every", "30", "--bank-every", "40", "--chat-every", "50"}); n < 30 {
 		t.Errorf("tight intervals scheduled only %d events in an hour, want at least ~36 (3600/100 * 3 classes)", n)
+	}
+}
+
+// reportLedgerFile writes a small but realistic day's ledger to a .jsonl file
+// (via the real JSONLLedger path, so the wire format is what ReadJSONL sees):
+// one session with clicks, a keypress, a bank visit, a chat and a stats-tab
+// glance, plus the session-end marker.
+func reportLedgerFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bot-20261010.jsonl")
+	jl, err := core.OpenJSONL(path, -1)
+	if err != nil {
+		t.Fatalf("OpenJSONL: %v", err)
+	}
+	events := []core.Entry{
+		{Tick: 0, Kind: "session-start", Detail: "4.0h, ~24 actions"},
+		{Tick: 10, Kind: "click", Detail: "click #1"},
+		{Tick: 20, Kind: "click", Detail: "click #2"},
+		{Tick: 30, Kind: "keypress", Detail: "keypress #3"},
+		{Tick: 40, Kind: "bank", Detail: "bank visit at t=4s"},
+		{Tick: 50, Kind: "chat", Detail: "chat 'ty' at t=5s"},
+		{Tick: 60, Kind: "glance", Detail: "stats-tab glance at t=6s"},
+		{Tick: 70, Kind: "click", Detail: "click #4"},
+		{Tick: 80, Kind: "session-end", Detail: "4.0h"},
+	}
+	for _, e := range events {
+		if err := jl.Append(e); err != nil {
+			t.Fatalf("append %+v: %v", e, err)
+		}
+	}
+	if err := jl.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return path
+}
+
+func TestReportSubcommandPrintsPerKindRows(t *testing.T) {
+	path := reportLedgerFile(t)
+	out := captureStdout(t, func() {
+		if err := runReport(path); err != nil {
+			t.Fatalf("runReport: %v", err)
+		}
+	})
+
+	// One row per kind, in first-seen (chronological) order.
+	for _, want := range []string{
+		"ledger ",
+		"session-start: 1",
+		"click: 3",
+		"keypress: 1",
+		"bank: 1",
+		"chat: 1",
+		"glance: 1",
+		"session-end: 1",
+		"total: 9 entries, span: 8s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report output missing %q:\n%s", want, out)
+		}
+	}
+	// Row order is the ledger's own chronology: session-start before click.
+	if i, j := strings.Index(out, "session-start: 1"), strings.Index(out, "click: 3"); i < 0 || j < 0 || i > j {
+		t.Errorf("rows not in first-seen order:\n%s", out)
+	}
+}
+
+func TestReportSubcommandMissingFileErrors(t *testing.T) {
+	captureStdout(t, func() {
+		if err := runReport(filepath.Join(t.TempDir(), "nope.jsonl")); err == nil {
+			t.Fatal("report on a missing file: want error, got nil")
+		}
+	})
+}
+
+func TestReportSubcommandRejectsCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.jsonl")
+	valid := []string{
+		`{"tick":10,"kind":"click","detail":"a"}`,
+		`not-json`, // line 2 is corrupt
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(valid, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	captureStdout(t, func() {
+		err := runReport(path)
+		if err == nil {
+			t.Fatal("corrupt file: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("error %q should name the offending line", err)
+		}
+	})
+
+	// A tick regression is just as corrupt: line 1 at tick 30 after line 0's
+	// tick 10.
+	regressed := []string{
+		`{"tick":10,"kind":"click","detail":"a"}`,
+		`{"tick":30,"kind":"click","detail":"b"}`,
+		`{"tick":20,"kind":"click","detail":"c"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(regressed, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	captureStdout(t, func() {
+		err := runReport(path)
+		if err == nil {
+			t.Fatal("non-increasing tick file: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "line 3") {
+			t.Errorf("error %q should name the offending line", err)
+		}
+	})
+}
+
+func TestReportSubcommandEmptyFileIsQuiet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := runReport(path); err != nil {
+			t.Fatalf("runReport on empty file: %v", err)
+		}
+	})
+	if !strings.Contains(out, "total: 0 entries, span: 0s") {
+		t.Errorf("empty-file report missing zero totals:\n%s", out)
+	}
+	// The only line besides the header is the totals line: no kind rows.
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "ledger ") {
+		t.Errorf("empty-file report = %d lines (%v), want header + totals only", len(lines), lines)
 	}
 }

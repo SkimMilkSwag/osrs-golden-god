@@ -27,6 +27,13 @@ import (
 //	    chat) for a 1h session at the given mean intervals (defaults: 300/900/
 //	    1200s). The Gaussian jitter is internal; output is illustrative, not
 //	    pinned.
+//
+//	osrs-golden-god report --file <ledger.jsonl>
+//	    Reads a day's .jsonl ledger (validating every line and the tick
+//	    monotonicity on disk) and prints its per-kind daily report: one
+//	    "kind: count" row in first-seen order, then totals and the session
+//	    span. A file that fails validation exits 1 with the offending line
+//	    named.
 
 // stdout is the writer the subcommands print to. It's a var (not os.Stdout
 // directly) so tests can swap in a buffer; it defaults to os.Stdout.
@@ -56,6 +63,21 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "report":
+		fs := flag.NewFlagSet("report", flag.ContinueOnError)
+		path := fs.String("file", "", "path to a .jsonl ledger file (required)")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		if *path == "" {
+			fmt.Fprintln(os.Stderr, "error: report needs --file <ledger.jsonl>")
+			os.Exit(2)
+		}
+		if err := runReport(*path); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -78,6 +100,10 @@ Usage:
       Print a personality-actions schedule for a 1h session: stats-tab
       glances, bank visits and chat messages at the given mean intervals
       (seconds; defaults 300/900/1200). Gaussian jitter is internal.
+  osrs-golden-god report --file <ledger.jsonl>
+      Read a day's .jsonl ledger and print its per-kind daily report:
+      one "kind: count" row in first-seen order, then totals and the
+      session span. Exits 1 (naming the line) if the file fails validation.
 `)
 }
 
@@ -151,6 +177,27 @@ func runHabits(args []string) error {
 		fmt.Fprintf(stdout, "  t=%5ds  %-6s %s\n", ev.Tick/10, ev.Kind, ev.Detail)
 	}
 	fmt.Fprintf(stdout, "total: %d scheduled personality events in 3600s\n", len(sched))
+	return nil
+}
+
+// runReport reads a day's .jsonl ledger file and prints its per-kind daily
+// report. ReadJSONL does the validation (every line parses as an Entry, ticks
+// strictly increasing on disk) and returns the offending line in its error,
+// so a corrupt or half-written file fails loudly with a name — exactly what
+// you want at 9pm when the day's evidence file looks off.
+func runReport(path string) error {
+	entries, _, err := core.ReadJSONL(path)
+	if err != nil {
+		return err
+	}
+	l := &core.Ledger{Entries: entries}
+	rep := l.BuildReport()
+
+	fmt.Fprintf(stdout, "ledger %s\n", path)
+	for _, row := range rep.Rows {
+		fmt.Fprintf(stdout, "  %s\n", row)
+	}
+	fmt.Fprintf(stdout, "total: %d entries, span: %ds\n", rep.Total, rep.Seconds)
 	return nil
 }
 
