@@ -44,7 +44,9 @@ func (l *Ledger) Append(e Entry) error {
 	return nil
 }
 
-// Stats summarizes the ledger for the daily report.
+// Stats summarizes the ledger for the daily report. Its named fields are a
+// projection over KindCounts (one tally, two views), so they can't drift
+// out of sync with the per-kind counts.
 type Stats struct {
 	Sessions      int
 	Clicks        int
@@ -55,30 +57,73 @@ type Stats struct {
 	DurationTicks int // span from first to last entry, inclusive
 }
 
-// Summarize counts entries by kind and computes the session time span.
+// KindCounts tallies ledger entries by kind and computes the session time
+// span. Unknown kinds count too: a new event class (or a typo in one) stays
+// visible in the report instead of silently vanishing from the named fields.
 // It does not validate ticks (Append already enforces that).
-func (l *Ledger) Summarize() Stats {
-	var s Stats
+func (l *Ledger) KindCounts() (map[string]int, int) {
+	counts := map[string]int{}
 	for _, e := range l.Entries {
-		switch e.Kind {
-		case "click":
-			s.Clicks++
-		case "keypress":
-			s.Keypresses++
-		case "bank":
-			s.Banks++
-		case "chat":
-			s.Chats++
-		case "glance":
-			s.Glances++
-		case "session-start":
-			s.Sessions++
+		counts[e.Kind]++
+	}
+	var span int
+	if n := len(l.Entries); n > 0 {
+		span = l.Entries[n-1].Tick - l.Entries[0].Tick
+	}
+	return counts, span
+}
+
+// Summarize counts entries by kind and computes the session time span. It is
+// a thin projection over KindCounts: the named fields stay for existing
+// callers, and both views come from one tally so they can't disagree.
+func (l *Ledger) Summarize() Stats {
+	counts, span := l.KindCounts()
+	return Stats{
+		Sessions:      counts["session-start"],
+		Clicks:        counts["click"],
+		Keypresses:    counts["keypress"],
+		Banks:         counts["bank"],
+		Chats:         counts["chat"],
+		Glances:       counts["glance"],
+		DurationTicks: span,
+	}
+}
+
+// Report is the daily-report view of a ledger: one row per event kind, in
+// first-seen order (the ledger's own chronology), plus total entries and the
+// session time span in seconds. Kinds nobody logged produce no rows, so a
+// quiet day stays quiet; a kind nobody *knew* about still shows up — that's
+// how you find out a new event class landed in a file.
+type Report struct {
+	// Rows is one line of the report per kind, e.g. "click: 1342".
+	Rows []string
+	// Total entries in the ledger (sum over all kinds).
+	Total int
+	// Seconds from the first to the last entry (0 for an empty ledger).
+	Seconds int
+}
+
+// BuildReport renders the ledger into a daily report. The order of Rows is
+// deterministic — first-seen, per tick order — so a fixed day's file always
+// prints the same report, and tests can pin full outputs.
+func (l *Ledger) BuildReport() Report {
+	counts := map[string]int{}
+	var order []string
+	total := 0
+	for _, e := range l.Entries {
+		if _, seen := counts[e.Kind]; !seen {
+			order = append(order, e.Kind)
 		}
+		counts[e.Kind]++
+		total++
 	}
-	if len(l.Entries) > 0 {
-		first := l.Entries[0].Tick
-		last := l.Entries[len(l.Entries)-1].Tick
-		s.DurationTicks = last - first
+	var seconds int
+	if n := len(l.Entries); n > 0 {
+		seconds = (l.Entries[n-1].Tick - l.Entries[0].Tick) / 10 // 600ms ticks -> seconds
 	}
-	return s
+	rep := Report{Total: total, Seconds: seconds}
+	for _, kind := range order {
+		rep.Rows = append(rep.Rows, fmt.Sprintf("%s: %d", kind, counts[kind]))
+	}
+	return rep
 }
