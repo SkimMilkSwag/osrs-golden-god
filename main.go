@@ -66,6 +66,7 @@ func main() {
 	case "report":
 		fs := flag.NewFlagSet("report", flag.ContinueOnError)
 		path := fs.String("file", "", "path to a .jsonl ledger file (required)")
+		asJSON := fs.Bool("json", false, "print the report as a single JSON object instead of lines")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
@@ -74,7 +75,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: report needs --file <ledger.jsonl>")
 			os.Exit(2)
 		}
-		if err := runReport(*path); err != nil {
+		if err := runReport(*path, *asJSON); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -184,14 +185,34 @@ func runHabits(args []string) error {
 // report. ReadJSONL does the validation (every line parses as an Entry, ticks
 // strictly increasing on disk) and returns the offending line in its error,
 // so a corrupt or half-written file fails loudly with a name — exactly what
-// you want at 9pm when the day's evidence file looks off.
-func runReport(path string) error {
+// you want at 9pm when the day's evidence file looks off. When asJSON is set,
+// the report goes out as a single JSON object ({"file":..., "counts":{kind:
+// n}, "total":N, "seconds":S}) for jq/scripts instead of human-readable rows.
+func runReport(path string, asJSON bool) error {
 	entries, _, err := core.ReadJSONL(path)
 	if err != nil {
 		return err
 	}
 	l := &core.Ledger{Entries: entries}
 	rep := l.BuildReport()
+
+	if asJSON {
+		out := struct {
+			File    string         `json:"file"`
+			Counts  map[string]int `json:"counts"`
+			Total   int            `json:"total"`
+			Seconds int            `json:"seconds"`
+		}{File: path, Counts: rep.Counts(), Total: rep.Total, Seconds: rep.Seconds}
+		if len(out.Counts) == 0 {
+			out.Counts = map[string]int{} // marshal as {}, not null
+		}
+		b, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal report: %w", err)
+		}
+		fmt.Fprintln(stdout, string(b))
+		return nil
+	}
 
 	fmt.Fprintf(stdout, "ledger %s\n", path)
 	for _, row := range rep.Rows {

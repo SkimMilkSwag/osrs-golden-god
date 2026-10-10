@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -239,7 +240,7 @@ func reportLedgerFile(t *testing.T) string {
 func TestReportSubcommandPrintsPerKindRows(t *testing.T) {
 	path := reportLedgerFile(t)
 	out := captureStdout(t, func() {
-		if err := runReport(path); err != nil {
+		if err := runReport(path, false); err != nil {
 			t.Fatalf("runReport: %v", err)
 		}
 	})
@@ -268,10 +269,92 @@ func TestReportSubcommandPrintsPerKindRows(t *testing.T) {
 
 func TestReportSubcommandMissingFileErrors(t *testing.T) {
 	captureStdout(t, func() {
-		if err := runReport(filepath.Join(t.TempDir(), "nope.jsonl")); err == nil {
+		if err := runReport(filepath.Join(t.TempDir(), "nope.jsonl"), false); err == nil {
 			t.Fatal("report on a missing file: want error, got nil")
 		}
 	})
+}
+
+func TestReportSubcommandJSONMode(t *testing.T) {
+	path := reportLedgerFile(t)
+
+	var doc struct {
+		File    string         `json:"file"`
+		Counts  map[string]int `json:"counts"`
+		Total   int            `json:"total"`
+		Seconds int            `json:"seconds"`
+	}
+	out := captureStdout(t, func() {
+		if err := runReport(path, true); err != nil {
+			t.Fatalf("runReport --json: %v", err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("--json output is not a JSON object: %v\n%s", err, out)
+	}
+
+	want := map[string]int{
+		"session-start": 1, "click": 3, "keypress": 1, "bank": 1,
+		"chat": 1, "glance": 1, "session-end": 1,
+	}
+	if len(doc.Counts) != len(want) {
+		t.Fatalf("counts = %v, want exactly these kinds: %v", doc.Counts, want)
+	}
+	for k, n := range want {
+		if doc.Counts[k] != n {
+			t.Errorf("counts[%q] = %d, want %d", k, doc.Counts[k], n)
+		}
+	}
+	if doc.Total != 9 || doc.Seconds != 8 {
+		t.Errorf("total=%d seconds=%d, want total 9 and span 8s", doc.Total, doc.Seconds)
+	}
+	if doc.File != path {
+		t.Errorf("file = %q, want %q", doc.File, path)
+	}
+
+	// --json must not leak the human-readable format.
+	if strings.Contains(out, "ledger ") || strings.Contains(out, "click: 3") {
+		t.Errorf("JSON mode leaked the line-based format:\n%s", out)
+	}
+
+	// JSON and line modes are two views of one tally: parse the line mode's
+	// rows and require they agree with the counts map.
+	lineOut := captureStdout(t, func() {
+		if err := runReport(path, false); err != nil {
+			t.Fatalf("runReport lines: %v", err)
+		}
+	})
+	lineCounts := map[string]int{}
+	for _, line := range strings.Split(lineOut, "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.LastIndex(line, ": "); i > 0 && !strings.Contains(line, "ledger ") && line != "" {
+			k := line[:i]
+			var n int
+			if _, err := fmt.Sscanf(line[i+len(": "):], "%d", &n); err == nil && k != "total" && k != "span:" {
+				lineCounts[k] = n
+			}
+		}
+	}
+	for k, n := range doc.Counts {
+		if lineCounts[k] != n {
+			t.Errorf("JSON mode says %s=%d, line mode says %d — must agree", k, n, lineCounts[k])
+		}
+	}
+
+	// Empty file: JSON mode still emits a valid object with an empty (not
+	// null) counts map.
+	emptyPath := filepath.Join(t.TempDir(), "empty.jsonl")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := runReport(emptyPath, true); err != nil {
+			t.Fatalf("runReport --json on empty file: %v", err)
+		}
+	})
+	if !strings.Contains(out, `"counts": {}`) {
+		t.Errorf("empty-file JSON should carry an empty counts object:\n%s", out)
+	}
 }
 
 func TestReportSubcommandRejectsCorruptFile(t *testing.T) {
@@ -285,7 +368,7 @@ func TestReportSubcommandRejectsCorruptFile(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	captureStdout(t, func() {
-		err := runReport(path)
+		err := runReport(path, false)
 		if err == nil {
 			t.Fatal("corrupt file: want error, got nil")
 		}
@@ -305,7 +388,7 @@ func TestReportSubcommandRejectsCorruptFile(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	captureStdout(t, func() {
-		err := runReport(path)
+		err := runReport(path, false)
 		if err == nil {
 			t.Fatal("non-increasing tick file: want error, got nil")
 		}
@@ -321,7 +404,7 @@ func TestReportSubcommandEmptyFileIsQuiet(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	out := captureStdout(t, func() {
-		if err := runReport(path); err != nil {
+		if err := runReport(path, false); err != nil {
 			t.Fatalf("runReport on empty file: %v", err)
 		}
 	})

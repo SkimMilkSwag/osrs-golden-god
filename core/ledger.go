@@ -101,11 +101,21 @@ type Report struct {
 	Total int
 	// Seconds from the first to the last entry (0 for an empty ledger).
 	Seconds int
+
+	counts map[string]int // per-kind tally kept for Counts()
+}
+
+// Counts is the per-kind tally behind a Report — the machine-readable form of
+// the same data Rows renders, derived from the ledger's entries rather than
+// by parsing formatted strings.
+func (r *Report) Counts() map[string]int {
+	return r.counts
 }
 
 // BuildReport renders the ledger into a daily report. The order of Rows is
 // deterministic — first-seen, per tick order — so a fixed day's file always
-// prints the same report, and tests can pin full outputs.
+// prints the same report, and tests can pin full outputs. The per-kind map it
+// tallies along the way is kept for Report.Counts().
 func (l *Ledger) BuildReport() Report {
 	counts := map[string]int{}
 	var order []string
@@ -121,7 +131,7 @@ func (l *Ledger) BuildReport() Report {
 	if n := len(l.Entries); n > 0 {
 		seconds = (l.Entries[n-1].Tick - l.Entries[0].Tick) / 10 // 600ms ticks -> seconds
 	}
-	rep := Report{Total: total, Seconds: seconds}
+	rep := Report{Total: total, Seconds: seconds, counts: counts}
 	for _, kind := range order {
 		rep.Rows = append(rep.Rows, fmt.Sprintf("%s: %d", kind, counts[kind]))
 	}
